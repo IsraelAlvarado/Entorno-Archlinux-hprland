@@ -6,10 +6,9 @@ PORT=7000
 
 cd "$PROJECT_DIR"
 
-if ! docker compose ps odysseus | grep -q "Up"; then
+if ! docker compose ps odysseus 2>/dev/null | grep -q "Up"; then
     docker compose up -d odysseus
+    sleep 2
 fi
 
-xdg-open "http://localhost:$PORT" 2>/dev/null || \
-    brave "http://localhost:$PORT" 2>/dev/null || \
-    firefox "http://localhost:$PORT" 2>/dev/null
+brave "http://localhost:$PORT"

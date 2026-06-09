@@ -1,19 +1,11 @@
+```bash
 #!/usr/bin/env bash
 
 ACCENT="#89b4fa"
 
-SERVICES=(
-    "docker|Docker Daemon|Motor de contenedores"
-    "mongodb|MongoDB|Base de datos"
-    "ollama|Ollama AI|Modelos IA locales (~1-2 GiB)"
-    "waydroid-container|Waydroid|Contenedor Android"
-    "warp-svc|Cloudflare WARP|VPN en segundo plano"
-    "bluetooth|Bluetooth|Dispositivos BT"
-    "cups|Impresión CUPS|Impresora"
-    "cpupower|CPU Power|Frecuencia CPU"
-    "tlp|TLP Batería|Optimización de batería"
-    "NetworkManager|NetworkManager|Red (mantener activo)"
-)
+# ── Umbrales RAM (KB) ─────────────────────────────────────
+RAM_HIGH=102400   # > 100 MB
+RAM_MED=20480     # > 20 MB
 
 # ── Auth ─────────────────────────────────────────────────
 
@@ -57,6 +49,67 @@ is_active()  { systemctl is-active  "$1" 2>/dev/null | grep -q "^active$";  }
 enabled_label() { is_enabled "$1" && echo "󰄬 Arranque ON"  || echo "󰅖 Arranque OFF"; }
 active_label()  { is_active  "$1" && echo "▶ Corriendo"    || echo "■ Detenido";     }
 
+# ── RAM ──────────────────────────────────────────────────
+
+get_ram_kb() {
+    local svc="$1"
+    local kb
+    kb=$(systemctl show "${svc}.service" --property=MemoryCurrent --no-pager 2>/dev/null \
+        | cut -d= -f2-)
+    # MemoryCurrent devuelve bytes o "[not set]" / "infinity" si no está activo
+    if [[ "$kb" =~ ^[0-9]+$ ]]; then
+        echo $(( kb / 1024 ))
+    else
+        echo 0
+    fi
+}
+
+ram_label() {
+    local kb="$1"
+    if [ "$kb" -eq 0 ]; then
+        echo "— N/D"
+    elif [ "$kb" -gt "$RAM_HIGH" ]; then
+        local mb=$(( kb / 1024 ))
+        echo "▲ Alto  ${mb} MB"
+    elif [ "$kb" -gt "$RAM_MED" ]; then
+        local mb=$(( kb / 1024 ))
+        echo "● Medio  ${mb} MB"
+    else
+        echo "▼ Bajo  ${kb} KB"
+    fi
+}
+
+# ── Descubrimiento de servicios ───────────────────────────
+
+get_services() {
+    local filter="${1:-all}"
+    case "$filter" in
+        active)
+            systemctl list-units --type=service --state=active --no-legend --no-pager \
+                | awk '{print $1}' | sed 's/\.service$//' | sort
+            ;;
+        inactive)
+            systemctl list-units --type=service --state=inactive --no-legend --no-pager \
+                | awk '{print $1}' | sed 's/\.service$//' | sort
+            ;;
+        *)
+            systemctl list-unit-files --type=service --no-legend --no-pager \
+                | awk '{print $1}' | sed 's/\.service$//' | sort
+            ;;
+    esac
+}
+
+get_description() {
+    systemctl show "${1}.service" --property=Description --no-pager 2>/dev/null \
+        | cut -d= -f2-
+}
+
+get_display_name() {
+    local desc
+    desc=$(get_description "$1")
+    [ -n "$desc" ] && echo "$desc" || echo "$1"
+}
+
 # ── Acciones ─────────────────────────────────────────────
 
 toggle_startup() {
@@ -88,24 +141,34 @@ toggle_now() {
 # ── GUI ──────────────────────────────────────────────────
 
 build_rows() {
-    for entry in "${SERVICES[@]}"; do
-        IFS="|" read -r svc name desc <<< "$entry"
-        printf "%s\n%s\n%s\n%s\n%s\n" \
-            "$name" \
+    local filter="${1:-all}"
+    while IFS= read -r svc; do
+        local ram_kb
+        ram_kb=$(get_ram_kb "$svc")
+        printf "%s\n%s\n%s\n%s\n%s\n%s\n" \
+            "$(get_display_name "$svc")" \
             "$svc" \
             "$(enabled_label "$svc")" \
             "$(active_label  "$svc")" \
-            "$desc"
-    done
+            "$(ram_label "$ram_kb")" \
+            "$(get_description "$svc")"
+    done < <(get_services "$filter")
 }
 
 show_gui() {
+    local filter="${1:-all}"
     local tmpfile
     tmpfile=$(mktemp)
 
-    build_rows | yad --list \
+    case "$filter" in
+        active)   filter_label="Mostrando: <b>Corriendo</b>" ;;
+        inactive) filter_label="Mostrando: <b>Detenidos</b>" ;;
+        *)        filter_label="Mostrando: <b>Todos</b>"     ;;
+    esac
+
+    build_rows "$filter" | yad --list \
         --title="Gestor de Arranque del Sistema" \
-        --width=980 \
+        --width=1100 \
         --height=420 \
         --center \
         --borders=12 \
@@ -115,10 +178,14 @@ show_gui() {
         --column="ID":TEXT \
         --column="Arranque":TEXT \
         --column="Estado actual":TEXT \
+        --column="RAM":TEXT \
         --column="Descripción":TEXT \
-        --text="<b><span color='${ACCENT}' size='large'>Servicios del sistema</span></b>\n<span color='#bbbbbb'>Selecciona una fila y usa los botones para controlarlo</span>" \
+        --text="<b><span color='${ACCENT}' size='large'>Servicios del sistema</span></b>  <span color='#bbbbbb'>${filter_label}</span>\n<span color='#bbbbbb'>Selecciona una fila y usa los botones para controlarlo</span>" \
         --button="󰒓 Toggle Arranque:0" \
         --button="⏯ Iniciar/Detener:2" \
+        --button="󱃝 Corriendo:4" \
+        --button="󰝦 Detenidos:6" \
+        --button="󰋚 Todos:8" \
         --button="󰈆 Cerrar:1" \
         2>/dev/null > "$tmpfile"
 
@@ -132,14 +199,28 @@ show_gui() {
 
 # ── Loop principal ────────────────────────────────────────
 
+CURRENT_FILTER="all"
+
 while true; do
-    RESULT=$(show_gui)
+    RESULT=$(show_gui "$CURRENT_FILTER")
     EXIT_CODE="${RESULT%%$'\n'*}"
     SVC="${RESULT#*$'\n'}"
 
     case "$EXIT_CODE" in
         1|252)
             exit 0
+            ;;
+        4)
+            CURRENT_FILTER="active"
+            continue
+            ;;
+        6)
+            CURRENT_FILTER="inactive"
+            continue
+            ;;
+        8)
+            CURRENT_FILTER="all"
+            continue
             ;;
         0)
             if [ -z "$SVC" ]; then
@@ -161,3 +242,4 @@ while true; do
             ;;
     esac
 done
+```
