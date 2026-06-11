@@ -4,6 +4,10 @@ set -euo pipefail
 PROJECT_DIR="/home/israel/Downloads/proyectos de github/odysseus/odysseus"
 PORT=7000
 
+if ! systemctl is-active --quiet docker.service; then
+    sudo -n systemctl start docker.service
+fi
+
 cd "$PROJECT_DIR"
 
 if ! docker compose ps odysseus 2>/dev/null | grep -q "Up"; then

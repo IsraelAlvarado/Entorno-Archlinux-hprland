@@ -6,247 +6,226 @@ CONFIG_FILE="$HOME/.config/hypr/scripts/wallpaper.conf"
 pgrep awww-daemon >/dev/null || awww-daemon &
 sleep 1
 
-mapfile -t WALLPAPERS < <(find "$WALLPAPER_DIR" -type f \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" -o -iname "*.webp" \))
-[ ${#WALLPAPERS[@]} -eq 0 ] && exit 1
+mapfile -t WALLPAPERS < <(find "$WALLPAPER_DIR" -type f \
+    \( -iname "*.jpg" -o -iname "*.jpeg" -o -iname "*.png" \
+       -o -iname "*.webp" -o -iname "*.mp4" \))
+[[ ${#WALLPAPERS[@]} -eq 0 ]] && exit 1
 
 # =========================================================
 # FUNCIONES NÚCLEO
 # =========================================================
+
+is_video() { [[ "${1,,}" =~ \.mp4$ ]]; }
+
 pick_different() {
-    local last="$1"; shift; local array=("$@"); local new=""
+    local last="$1"; shift; local arr=("$@"); local val
     while true; do
-        new=${array[$RANDOM % ${#array[@]}]}
-        [[ "$new" != "$last" ]] && break
+        val=${arr[$RANDOM % ${#arr[@]}]}
+        [[ "$val" != "$last" ]] && break
     done
-    echo "$new"
+    echo "$val"
+}
+
+set_wallpaper() {
+    local file="$1"
+    if is_video "$file"; then
+        command -v mpvpaper &>/dev/null || return
+        pkill mpvpaper 2>/dev/null
+        mpvpaper -o "--loop --no-audio" "*" "$file" &
+        return
+    fi
+    pkill mpvpaper 2>/dev/null
+    awww img "$file" \
+        --transition-type     "$active_trans" \
+        --transition-duration "$active_dur" \
+        --transition-fps      "$active_fps" \
+        --transition-angle    "$angle" \
+        --transition-pos      "$position"
+}
+
+# Bounding box exacto de IW×IH rotado ROT grados (normaliza a 0-90)
+rotated_bbox() {
+    awk -v iw="$1" -v ih="$2" -v rot="$3" 'BEGIN {
+        pi = 3.14159265358979
+        r  = rot % 360
+        if (r < 0) r += 360
+        r  = r % 180
+        if (r > 90) r = 180 - r
+        r  = r * pi / 180
+        printf "%d %d", int(iw*cos(r) + ih*sin(r)) + 4, int(iw*sin(r) + ih*cos(r)) + 4
+    }' /dev/null
 }
 
 # =========================================================
-# COLLAGE REESCRITO
+# COLLAGE
 # =========================================================
 create_collage() {
-    local MIN_IMG=$1
-    local MAX_IMG=$2
+    local MIN_IMG=$1 MAX_IMG=$2
     local TMP="/tmp/awww-collage.png"
+    local W=2560 H=1600
+
+    mapfile -t STATIC < <(printf "%s\n" "${WALLPAPERS[@]}" | grep -vEi '\.mp4$')
+    [[ ${#STATIC[@]} -lt $MIN_IMG ]] && return 1
 
     local COUNT=$(( MIN_IMG + RANDOM % (MAX_IMG - MIN_IMG + 1) ))
-    mapfile -t PICKS < <(printf "%s\n" "${WALLPAPERS[@]}" | shuf -n "$COUNT")
+    mapfile -t PICKS < <(printf "%s\n" "${STATIC[@]}" | shuf -n "$COUNT")
 
-    local W=2560
-    local H=1600
-
-    # Layouts disponibles: grid, scatter, cascade, strip_h, strip_v, fan
     local LAYOUTS=(grid scatter cascade strip_h strip_v fan)
     local LAYOUT=${LAYOUTS[$RANDOM % ${#LAYOUTS[@]}]}
+    local SHAPE_LIST=(circle landscape portrait square wide tall)
 
-    # --- Calcular posiciones según layout ---
     declare -a POS_X POS_Y SIZES ROTATIONS SHAPES
 
     case "$LAYOUT" in
-
         grid)
-            # Cuadrícula uniforme con leve rotación
-            local COLS=$(( (COUNT + 1) / 2 ))
-            local ROWS=2
-            [ $COUNT -le 2 ] && COLS=$COUNT && ROWS=1
-            local CELL_W=$(( W / COLS ))
-            local CELL_H=$(( H / ROWS ))
-            local PAD=30
+            local COLS=$(( (COUNT + 1) / 2 )) ROWS=2
+            [[ $COUNT -le 2 ]] && COLS=$COUNT && ROWS=1
+            local CW=$(( W / COLS )) CH=$(( H / ROWS ))
             for (( i=0; i<COUNT; i++ )); do
-                local col=$(( i % COLS ))
-                local row=$(( i / COLS ))
-                SIZES[$i]=$(( CELL_W < CELL_H ? CELL_W - PAD*2 : CELL_H - PAD*2 ))
-                POS_X[$i]=$(( col * CELL_W + PAD ))
-                POS_Y[$i]=$(( row * CELL_H + PAD ))
-                ROTATIONS[$i]=$(( -8 + RANDOM % 17 ))   # -8 a +8 grados
+                local col=$(( i % COLS )) row=$(( i / COLS ))
+                local cell_min=$(( CW < CH ? CW : CH ))
+                SIZES[$i]=$(( cell_min - 60 ))
+                POS_X[$i]=$(( col * CW + CW/2 ))
+                POS_Y[$i]=$(( row * CH + CH/2 ))
+                ROTATIONS[$i]=$(( -8 + RANDOM % 17 ))
             done
             ;;
-
         scatter)
-            # Dispersión libre pero con margen de seguridad expandido por rotación
             for (( i=0; i<COUNT; i++ )); do
                 local sz=$(( 350 + RANDOM % 550 ))
-                SIZES[$i]=$sz
-                # El margen seguro considera la diagonal del bbox rotado: sz * 0.72 (sqrt(2)/2 aprox)
                 local safe=$(( sz * 72 / 100 ))
-                local max_x=$(( W - safe * 2 ))
-                local max_y=$(( H - safe * 2 ))
-                POS_X[$i]=$(( safe + RANDOM % max_x ))
-                POS_Y[$i]=$(( safe + RANDOM % max_y ))
-                ROTATIONS[$i]=$(( -35 + RANDOM % 71 ))   # -35 a +35
+                SIZES[$i]=$sz
+                POS_X[$i]=$(( safe + RANDOM % (W - safe*2) ))
+                POS_Y[$i]=$(( safe + RANDOM % (H - safe*2) ))
+                ROTATIONS[$i]=$(( -35 + RANDOM % 71 ))
             done
             ;;
-
         cascade)
-            # En diagonal de esquina a esquina
             for (( i=0; i<COUNT; i++ )); do
                 local sz=$(( 500 + RANDOM % 400 ))
-                SIZES[$i]=$sz
                 local safe=$(( sz * 72 / 100 ))
                 local step_x=$(( (W - safe*2) / (COUNT > 1 ? COUNT-1 : 1) ))
                 local step_y=$(( (H - safe*2) / (COUNT > 1 ? COUNT-1 : 1) ))
-                local jitter_x=$(( -60 + RANDOM % 121 ))
-                local jitter_y=$(( -60 + RANDOM % 121 ))
-                POS_X[$i]=$(( safe + i * step_x + jitter_x ))
-                POS_Y[$i]=$(( safe + i * step_y + jitter_y ))
-                # Clamp para no salirse
-                [[ ${POS_X[$i]} -lt $safe ]] && POS_X[$i]=$safe
-                [[ ${POS_Y[$i]} -lt $safe ]] && POS_Y[$i]=$safe
-                [[ ${POS_X[$i]} -gt $(( W - safe )) ]] && POS_X[$i]=$(( W - safe ))
-                [[ ${POS_Y[$i]} -gt $(( H - safe )) ]] && POS_Y[$i]=$(( H - safe ))
+                local px=$(( safe + i*step_x + (-60 + RANDOM % 121) ))
+                local py=$(( safe + i*step_y + (-60 + RANDOM % 121) ))
+                [[ $px -lt $safe       ]] && px=$safe
+                [[ $py -lt $safe       ]] && py=$safe
+                [[ $px -gt $((W-safe)) ]] && px=$((W-safe))
+                [[ $py -gt $((H-safe)) ]] && py=$((H-safe))
+                SIZES[$i]=$sz; POS_X[$i]=$px; POS_Y[$i]=$py
                 ROTATIONS[$i]=$(( -20 + RANDOM % 41 ))
             done
             ;;
-
         strip_h)
-            # Franja horizontal, imágenes apiladas verticalmente centradas
-            local CELL_W=$(( W / COUNT ))
+            local CW=$(( W / COUNT ))
             for (( i=0; i<COUNT; i++ )); do
-                local sz=$(( CELL_W - 40 ))
-                [[ $sz -gt $(( H - 80 )) ]] && sz=$(( H - 80 ))
+                local sz=$(( CW - 40 ))
+                [[ $sz -gt $((H-80)) ]] && sz=$((H-80))
                 SIZES[$i]=$sz
-                POS_X[$i]=$(( i * CELL_W + (CELL_W - sz) / 2 ))
-                POS_Y[$i]=$(( (H - sz) / 2 + (-40 + RANDOM % 81) ))
+                POS_X[$i]=$(( i*CW + CW/2 ))
+                POS_Y[$i]=$(( H/2 + (-40 + RANDOM % 81) ))
                 ROTATIONS[$i]=$(( -12 + RANDOM % 25 ))
             done
             ;;
-
         strip_v)
-            # Franja vertical
-            local CELL_H=$(( H / COUNT ))
+            local CH=$(( H / COUNT ))
             for (( i=0; i<COUNT; i++ )); do
-                local sz=$(( CELL_H - 40 ))
-                [[ $sz -gt $(( W - 80 )) ]] && sz=$(( W - 80 ))
+                local sz=$(( CH - 40 ))
+                [[ $sz -gt $((W-80)) ]] && sz=$((W-80))
                 SIZES[$i]=$sz
-                POS_X[$i]=$(( (W - sz) / 2 + (-40 + RANDOM % 81) ))
-                POS_Y[$i]=$(( i * CELL_H + (CELL_H - sz) / 2 ))
+                POS_X[$i]=$(( W/2 + (-40 + RANDOM % 81) ))
+                POS_Y[$i]=$(( i*CH + CH/2 ))
                 ROTATIONS[$i]=$(( -12 + RANDOM % 25 ))
             done
             ;;
-
         fan)
-            # En abanico desde un punto central-inferior
-            local cx=$(( W / 2 ))
-            local cy=$(( H + 100 ))   # Punto de origen debajo de la pantalla
+            local fcx=$(( W/2 )) fcy=$(( H + 100 ))
             local radius=$(( 600 + RANDOM % 400 ))
-            local arc_start=$(( 200 ))   # Grados de inicio del arco
-            local arc_end=$(( 340 ))
-            local arc_range=$(( arc_end - arc_start ))
             for (( i=0; i<COUNT; i++ )); do
                 local sz=$(( 400 + RANDOM % 400 ))
-                SIZES[$i]=$sz
-                local angle_deg=$(( arc_start + arc_range * i / (COUNT > 1 ? COUNT-1 : 1) ))
-                # Convertir a radianes con awk
-                local px py
-                px=$(awk "BEGIN { printf \"%d\", $cx + $radius * cos($angle_deg * 3.14159 / 180) }")
-                py=$(awk "BEGIN { printf \"%d\", $cy + $radius * sin($angle_deg * 3.14159 / 180) }")
-                # El margen de rotación sigue la dirección del arco
-                local safe=$(( sz * 72 / 100 ))
-                [[ $px -lt $safe ]] && px=$safe
-                [[ $py -lt $safe ]] && py=$safe
-                [[ $px -gt $(( W - safe )) ]] && px=$(( W - safe ))
-                [[ $py -gt $(( H - safe )) ]] && py=$(( H - safe ))
-                POS_X[$i]=$px
-                POS_Y[$i]=$py
-                ROTATIONS[$i]=$(( angle_deg - 270 + (-10 + RANDOM % 21) ))
+                local adeg=$(( 200 + 140*i / (COUNT > 1 ? COUNT-1 : 1) ))
+                local px py safe
+                px=$(awk -v cx="$fcx" -v r="$radius" -v a="$adeg" \
+                    'BEGIN{printf "%d", cx + r*cos(a*3.14159/180)}' /dev/null)
+                py=$(awk -v cy="$fcy" -v r="$radius" -v a="$adeg" \
+                    'BEGIN{printf "%d", cy + r*sin(a*3.14159/180)}' /dev/null)
+                safe=$(( sz * 72 / 100 ))
+                [[ $px -lt $safe       ]] && px=$safe
+                [[ $py -lt $safe       ]] && py=$safe
+                [[ $px -gt $((W-safe)) ]] && px=$((W-safe))
+                [[ $py -gt $((H-safe)) ]] && py=$((H-safe))
+                SIZES[$i]=$sz; POS_X[$i]=$px; POS_Y[$i]=$py
+                ROTATIONS[$i]=$(( adeg - 270 + (-10 + RANDOM % 21) ))
             done
             ;;
     esac
-
-    # --- Formas disponibles para cada imagen ---
-    # circle, landscape (16:9), portrait (9:16), square, wide (2:1), tall (1:2)
-    local SHAPE_LIST=(circle landscape portrait square wide tall)
 
     for (( i=0; i<COUNT; i++ )); do
         SHAPES[$i]=${SHAPE_LIST[$RANDOM % ${#SHAPE_LIST[@]}]}
     done
 
-    # =========================================================
-    # CONSTRUIR EL COLLAGE CON IMAGEMAGICK
-    # =========================================================
     magick -size ${W}x${H} xc:"#0e0e0e" "$TMP"
 
     for (( i=0; i<COUNT; i++ )); do
         local img="${PICKS[$i]}"
-        local sz=${SIZES[$i]}
-        local px=${POS_X[$i]}
-        local py=${POS_Y[$i]}
-        local rot=${ROTATIONS[$i]}
-        local shape=${SHAPES[$i]}
-        local opacity=$(( 70 + RANDOM % 31 ))   # 70–100%
-
-        # Calcular dimensiones según forma
+        local sz=${SIZES[$i]} cx=${POS_X[$i]} cy=${POS_Y[$i]}
+        local rot=${ROTATIONS[$i]} shape=${SHAPES[$i]}
+        local opacity=$(( 70 + RANDOM % 31 ))
+        local opacity_f; opacity_f=$(awk -v v="$opacity" 'BEGIN{printf "%.2f", v/100}' /dev/null)
         local iw ih
+
         case "$shape" in
-            circle)
-                iw=$sz; ih=$sz
-                ;;
+            circle|square) iw=$sz; ih=$sz ;;
             landscape)
                 iw=$(( sz * 16 / 9 ))
-                # Asegura que no supere el ancho útil
-                [[ $iw -gt $(( W - 100 )) ]] && iw=$(( W - 100 ))
+                [[ $iw -gt $((W-100)) ]] && iw=$((W-100))
                 ih=$(( iw * 9 / 16 ))
                 ;;
-            portrait)
-                ih=$sz
-                iw=$(( sz * 9 / 16 ))
-                ;;
-            square)
-                iw=$sz; ih=$sz
-                ;;
+            portrait)  ih=$sz; iw=$(( sz * 9 / 16 )) ;;
             wide)
                 iw=$(( sz * 2 ))
-                [[ $iw -gt $(( W - 100 )) ]] && iw=$(( W - 100 ))
+                [[ $iw -gt $((W-100)) ]] && iw=$((W-100))
                 ih=$(( iw / 2 ))
                 ;;
-            tall)
-                ih=$sz
-                iw=$(( sz / 2 ))
-                ;;
+            tall) ih=$sz; iw=$(( sz / 2 )) ;;
         esac
 
-        # Calcular safe después de conocer el tamaño real
-        local diag=$(awk "BEGIN { printf \"%d\", sqrt($iw*$iw + $ih*$ih) / 2 + 5 }")
-        local clamped_px=$px
-        local clamped_py=$py
-        [[ $clamped_px -lt $diag ]] && clamped_px=$diag
-        [[ $clamped_py -lt $diag ]] && clamped_py=$diag
-        [[ $clamped_px -gt $(( W - diag )) ]] && clamped_px=$(( W - diag ))
-        [[ $clamped_py -gt $(( H - diag )) ]] && clamped_py=$(( H - diag ))
+        local MASK="/tmp/awww-mask-${i}.png"
+        local RADIUS=$(( iw < ih ? iw/12 : ih/12 ))
+        [[ $RADIUS -lt 10 ]] && RADIUS=10
 
+        # Máscara: xc:none = alpha=0, dibujo blanco = alpha=255 en la forma
         if [[ "$shape" == "circle" ]]; then
-            # Máscara circular
-            local MASK="/tmp/awww-mask-${i}.png"
-            magick -size ${iw}x${ih} xc:none \
-                -fill white -draw "circle $(( iw/2 )),$(( ih/2 )) $(( iw/2 )),0" \
-                "$MASK"
-
-            magick "$TMP" \
-                \( "$img" -resize "${iw}x${ih}^" -gravity center -extent "${iw}x${ih}" \
-                   "$MASK" -alpha off -compose copy_opacity -composite \
-                   -alpha set -channel A -evaluate multiply "$(awk "BEGIN{printf \"%.2f\", $opacity/100}")" \
-                   -background none -rotate "$rot" \) \
-                -gravity None -geometry +${clamped_px}+${clamped_py} -composite "$TMP"
-
-            rm -f "$MASK"
-        else
-            # Formas rectangulares con esquinas redondeadas suaves
-            local MASK="/tmp/awww-mask-${i}.png"
-            local RADIUS=$(( iw < ih ? iw / 12 : ih / 12 ))
             magick -size ${iw}x${ih} xc:none \
                 -fill white \
-                -draw "roundrectangle 0,0,${iw},${ih},${RADIUS},${RADIUS}" \
+                -draw "circle $((iw/2)),$((ih/2)) $((iw/2)),0" \
                 "$MASK"
-
-            magick "$TMP" \
-                \( "$img" -resize "${iw}x${ih}^" -gravity center -extent "${iw}x${ih}" \
-                   "$MASK" -alpha off -compose copy_opacity -composite \
-                   -alpha set -channel A -evaluate multiply "$(awk "BEGIN{printf \"%.2f\", $opacity/100}")" \
-                   -background none -rotate "$rot" \) \
-                -gravity None -geometry +${clamped_px}+${clamped_py} -composite "$TMP"
-
-            rm -f "$MASK"
+        else
+            magick -size ${iw}x${ih} xc:none \
+                -fill white \
+                -draw "roundrectangle 0,0,$((iw-1)),$((ih-1)),${RADIUS},${RADIUS}" \
+                "$MASK"
         fi
+
+        # Bbox rotado para centrar la pieza en (cx, cy) — sin depender de magick identify
+        local rw rh ox oy
+        read -r rw rh < <(rotated_bbox "$iw" "$ih" "$rot")
+        ox=$(( cx - rw/2 ))
+        oy=$(( cy - rh/2 ))
+
+        # Pieza inline: DstIn aplica la máscara, Over final evita filtrar el estado DstIn
+        magick "$TMP" \
+            \( "$img" \
+               -resize "${iw}x${ih}^" -gravity center -extent "${iw}x${ih}" \
+               -alpha on \
+               "$MASK" -compose DstIn -composite \
+               -channel Alpha -evaluate multiply "$opacity_f" +channel \
+               -background none -rotate "$rot" \) \
+            -compose Over -gravity None \
+            -geometry "$(printf '%+d%+d' "$ox" "$oy")" \
+            -composite "$TMP"
+
+        rm -f "$MASK"
     done
 
     echo "$TMP"
@@ -258,19 +237,15 @@ create_collage() {
 SKIP_WALLPAPER=0
 trap 'SKIP_WALLPAPER=1' USR1
 
-LAST_TRANSITION=""
-LAST_POSITION=""
-LAST_ANGLE=""
-LAST_COLLAGE=0
+LAST_TRANSITION="" LAST_POSITION="" LAST_ANGLE="" LAST_COLLAGE=0
 INDEX=999999
-
+PLAYLIST=()
 TRANSITIONS=(fade wipe wave grow outer simple)
 POSITIONS=(center top bottom left right)
 
 while true; do
     SKIP_WALLPAPER=0
-
-    [ -f "$CONFIG_FILE" ] && source "$CONFIG_FILE"
+    [[ -f "$CONFIG_FILE" ]] && source "$CONFIG_FILE"
 
     INTERVAL=${INTERVAL:-30}
     ENABLE_COLLAGE=${ENABLE_COLLAGE:-1}
@@ -283,8 +258,8 @@ while true; do
     CONF_DURATION=${DURATION:-2}
     CONF_FPS=${FPS:-60}
 
-    if [ $INDEX -ge ${#PLAYLIST[@]} ]; then
-        if [ "$RANDOM_ORDER" -eq 1 ]; then
+    if [[ $INDEX -ge ${#PLAYLIST[@]} ]]; then
+        if [[ "$RANDOM_ORDER" -eq 1 ]]; then
             mapfile -t PLAYLIST < <(printf "%s\n" "${WALLPAPERS[@]}" | shuf)
         else
             mapfile -t PLAYLIST < <(printf "%s\n" "${WALLPAPERS[@]}" | sort)
@@ -292,12 +267,17 @@ while true; do
         INDEX=0
     fi
     CURRENT="${PLAYLIST[$INDEX]}"
+    INDEX=$(( INDEX + 1 ))
 
     USE_COLLAGE=0
-    if [[ "$ENABLE_COLLAGE" -eq 1 ]] && (( RANDOM % 100 < COLLAGE_CHANCE )) && [[ "$LAST_COLLAGE" -eq 0 ]]; then
-        USE_COLLAGE=1
-        LAST_COLLAGE=1
-        CURRENT=$(create_collage "$COLLAGE_MIN" "$COLLAGE_MAX")
+    if ! is_video "$CURRENT" && [[ "$ENABLE_COLLAGE" -eq 1 ]] && \
+       (( RANDOM % 100 < COLLAGE_CHANCE )) && [[ "$LAST_COLLAGE" -eq 0 ]]; then
+        if COLLAGE_PATH=$(create_collage "$COLLAGE_MIN" "$COLLAGE_MAX") && \
+           [[ -f "$COLLAGE_PATH" ]]; then
+            CURRENT="$COLLAGE_PATH"; USE_COLLAGE=1; LAST_COLLAGE=1
+        else
+            LAST_COLLAGE=0
+        fi
     else
         LAST_COLLAGE=0
     fi
@@ -313,32 +293,26 @@ while true; do
     fi
 
     position=$(pick_different "$LAST_POSITION" "${POSITIONS[@]}")
-    angle=$((RANDOM % 360))
-    while [[ "$angle" == "$LAST_ANGLE" ]]; do angle=$((RANDOM % 360)); done
+    angle=$(( RANDOM % 360 ))
+    while [[ "$angle" == "$LAST_ANGLE" ]]; do angle=$(( RANDOM % 360 )); done
 
     LAST_TRANSITION="$active_trans"
     LAST_POSITION="$position"
     LAST_ANGLE="$angle"
 
     if [[ "$USE_COLLAGE" -eq 1 ]]; then
-        active_dur=$((CONF_DURATION + 2)); active_fps=120
+        active_dur=$(( CONF_DURATION + 2 )); active_fps=120
     else
         active_dur=$CONF_DURATION; active_fps=$CONF_FPS
     fi
 
-    awww img "$CURRENT" \
-        --transition-type "$active_trans" \
-        --transition-duration "$active_dur" \
-        --transition-fps "$active_fps" \
-        --transition-angle "$angle" \
-        --transition-pos "$position"
-
-    INDEX=$((INDEX + 1))
+    set_wallpaper "$CURRENT"
 
     count=0
-    while [ $count -lt "$INTERVAL" ]; do
-        [ "$SKIP_WALLPAPER" -eq 1 ] && break
+    while [[ $count -lt $INTERVAL ]]; do
+        [[ "$SKIP_WALLPAPER" -eq 1 ]] && break
         sleep 1
-        count=$((count + 1))
+        (( count++ ))
     done
 done
+SCRIPT
